@@ -3,11 +3,20 @@ import { pgEnum } from "drizzle-orm/pg-core";
 import * as t from "drizzle-orm/pg-core";
 import { db, types, table } from "@duneanalytics/sim-idx";
 
+export const quoterError = table("quoter_error", {
+  reason: t.text('reason'),
+})
+
+export const quoterLowLevelError = table("quoter_low_level_error", {
+  lowLevelData: db.bytes('low_level_data'),
+})
+
 export const transfer = table("transfer", {
   fromAddress: db.address('from_address'),
   toAddress: db.address('to_address'),
   token: db.address('token'),
   value: db.uint256('value'),
+  ethValueInWei: db.uint256('eth_value_in_wei'),
   txHash: db.bytes32('tx_hash'),
   tokenContext: t.text('token_context'),
   blockNumber: db.uint256('block_number'),
