@@ -34,53 +34,39 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         ERC20$TransferEventParams memory inputs
     ) external override {
 
-        address deployedContract = ctx.sim.getDeployer(ctx.txn.call.callee());
+		address deployedContract = ctx.sim.getDeployer(ctx.txn.call.callee());
 
-        if (deployedContract == CLANKER_V4_FACTORY_BASE) {
+		string memory factoryVersion;
+		if (deployedContract == CLANKER_V4_FACTORY_BASE) {
+			factoryVersion = "4";
+		} else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
+			factoryVersion = "3.1";
+		} else {
+			return;
+		}
 
-            string memory tokenContext = IClankerTokenV3_1(ctx.txn.call.callee()).context();
-            bool isRetakeToken = containsStreammDeployment(tokenContext);
-            
-            TransferData memory data = TransferData({
-                fromAddress: inputs.from,
-                toAddress: inputs.to,
-                token: ctx.txn.call.callee(),
-                value: inputs.value,
-                txHash: ctx.txn.hash(),
-                tokenContext: tokenContext,
-                blockNumber: block.number,
-                blockTimestamp: block.timestamp,
-                sell: ctx.txn.call.caller() == inputs.from,
-                factoryVersion: "4",
-                contractDeployerAddress: deployedContract,
-                isRetakeToken: isRetakeToken
-            });
-            
-            emit Transfer(data);
+		string memory tokenContext = IClankerTokenV3_1(ctx.txn.call.callee()).context();
+		bool isRetakeToken = containsStreammDeployment(tokenContext);
+		if (!isRetakeToken) {
+			return;
+		}
 
-        } else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
-
-            string memory tokenContext = IClankerTokenV3_1(ctx.txn.call.callee()).context();
-            bool isRetakeToken = containsStreammDeployment(tokenContext);
-
-            TransferData memory data = TransferData({
-                fromAddress: inputs.from,
-                toAddress: inputs.to,
-                token: ctx.txn.call.callee(),
-                value: inputs.value,
-                txHash: ctx.txn.hash(),
-                tokenContext: tokenContext,
-                blockNumber: block.number,
-                blockTimestamp: block.timestamp,
-                sell: ctx.txn.call.caller() == inputs.from,
-                factoryVersion: "3.1",
-                contractDeployerAddress: deployedContract,
-                isRetakeToken: isRetakeToken
-            });
-            
-            emit Transfer(data);
-
-        }
+		TransferData memory data = TransferData({
+			fromAddress: inputs.from,
+			toAddress: inputs.to,
+			token: ctx.txn.call.callee(),
+			value: inputs.value,
+			txHash: ctx.txn.hash(),
+			tokenContext: tokenContext,
+			blockNumber: block.number,
+			blockTimestamp: block.timestamp,
+			sell: ctx.txn.call.caller() == inputs.from,
+			factoryVersion: factoryVersion,
+			contractDeployerAddress: deployedContract,
+			isRetakeToken: isRetakeToken
+		});
+        
+		emit Transfer(data);
     }
 
     // ---------- helpers ----------
