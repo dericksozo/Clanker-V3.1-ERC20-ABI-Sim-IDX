@@ -19,7 +19,7 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
 
     address constant WETH_BASE                   = 0x4200000000000000000000000000000000000006;
     address constant UNISWAP_V4_QUOTER_BASE      = 0x0d5e0F971ED27FBfF6c2837bf31316121532048D;
-    address constant UNISWAP_V3_QUOTER_BASE      = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e; // QuoterV2
+    address constant UNISWAP_V3_QUOTER_BASE      = 0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a; // QuoterV2
     uint256 constant MINIMUM_ETH_VALUE           = 0.001 ether;
     uint24 public constant DYNAMIC_FEE_FLAG = 0x800000; // Uniswap v4 dynamic fee flag
 
@@ -42,6 +42,8 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
     event Transfer(TransferData);
     event QuoterError(string reason);
     event QuoterLowLevelError(bytes lowLevelData);
+	event V3QuoterError(string reason);
+	event V3QuoterLowLevelError(bytes lowLevelData);
 
     function onTransferEvent(
         EventContext memory ctx,
@@ -59,7 +61,12 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
 			return;
 		}
 
-		string memory tokenContext = IClankerTokenV3_1(ctx.txn.call.callee()).context();
+		string memory tokenContext;
+		try IClankerTokenV3_1(ctx.txn.call.callee()).context() returns (string memory _context) {
+			tokenContext = _context;
+		} catch {
+			return;
+		}
 		bool isRetakeToken = containsStreammDeployment(tokenContext);
 
 		if (!isRetakeToken) {
@@ -82,9 +89,9 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
 			);
 		}
 
-		if (ethValueInWei < MINIMUM_ETH_VALUE) {
-			return;
-		}
+		// if (ethValueInWei < MINIMUM_ETH_VALUE) {
+		// 	return;
+		// }
         
 		TransferData memory data = TransferData({
 			fromAddress: inputs.from,
@@ -159,29 +166,42 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
     }
 
     function getValueInEthV31(
-		address token,
-		bytes32 txHash,
-		uint256 amount
-	) internal returns (uint256) {
-		// Try common v3 fee tiers: 0.05%, 0.3%, 1%
-		uint24[3] memory feeTiers = [uint24(500), uint24(3000), uint24(10000)];
+        address token,
+        bytes32 txHash,
+        uint256 amount
+    ) internal returns (uint256) {
+		// Only use 1% (10000) tier as per v3.1 docs
+		uint24 onePercentFee = 10000;
 		IV3QuoterV2 quoter = IV3QuoterV2(UNISWAP_V3_QUOTER_BASE);
-		for (uint256 i = 0; i < feeTiers.length; i++) {
-			uint24 fee = feeTiers[i];
-			try quoter.quoteExactInputSingle(
-				token,
-				WETH_BASE,
-				fee,
-				amount,
-				0
-			) returns (uint256 amountOut, uint160, uint32, uint256) {
-				if (amountOut > 0) {
-					return amountOut;
-				}
-			} catch {}
-		}
+		// 1) Single hop at 1%
+		try quoter.quoteExactInputSingle(
+			token,
+			WETH_BASE,
+			onePercentFee,
+			amount,
+			0
+		) returns (uint256 amountOutSingle, uint160, uint32, uint256) {
+			if (amountOutSingle > 0) {
+				return amountOutSingle;
+			}
+		} catch {}
+
+		// 2) Fallback: multi-hop via USDC with 1% on both legs (token -> USDC -> WETH)
+		address USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+		bytes memory path = abi.encodePacked(token, onePercentFee, USDC_BASE, onePercentFee, WETH_BASE);
+		try quoter.quoteExactInput(path, amount) returns (
+			uint256 amountOut,
+			uint160[] memory,
+			uint32[] memory,
+			uint256
+		) {
+			if (amountOut > 0) {
+				return amountOut;
+			}
+		} catch {}
+
 		return 0;
-	}
+    }
 
     function addressSort(
         address a,

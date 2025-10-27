@@ -26,3 +26,11 @@ export const transfer = table("transfer", {
   contractDeployerAddress: db.address('contract_deployer_address'),
   isRetakeToken: t.boolean('is_retake_token'),
 })
+
+export const v3QuoterError = table("v3_quoter_error", {
+  reason: t.text('reason'),
+})
+
+export const v3QuoterLowLevelError = table("v3_quoter_low_level_error", {
+  lowLevelData: db.bytes('low_level_data'),
+})
