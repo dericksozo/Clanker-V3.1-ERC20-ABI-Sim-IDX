@@ -134,10 +134,10 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
             );
         }
 
-        // if (ethValueInWei < MINIMUM_ETH_VALUE) {
-        //  return;
-        // }
-
+        if (ethValueInWei < MINIMUM_ETH_VALUE) {
+         return;
+        }
+        
         TransferData memory data = TransferData({
             fromAddress: inputs.from,
             toAddress: inputs.to,
