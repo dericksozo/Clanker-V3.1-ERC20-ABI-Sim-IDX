@@ -10,21 +10,7 @@ app.get("/*", async (c) => {
   try {
     const result = await db
       .client(c)
-      .select({
-        fromAddress: transfer.fromAddress,
-        toAddress: transfer.toAddress,
-        token: transfer.token,
-        value: transfer.value,
-        ethValueInWei: transfer.ethValueInWei,
-        txHash: transfer.txHash,
-        tokenContext: transfer.tokenContext,
-        blockNumber: transfer.blockNumber,
-        blockTimestamp: transfer.blockTimestamp,
-        sell: transfer.sell,
-        factoryVersion: transfer.factoryVersion,
-        contractDeployerAddress: transfer.contractDeployerAddress,
-        isRetakeToken: transfer.isRetakeToken,
-      })
+      .select()
       .from(transfer)
       .limit(50);
     // Deduplicate token addresses
