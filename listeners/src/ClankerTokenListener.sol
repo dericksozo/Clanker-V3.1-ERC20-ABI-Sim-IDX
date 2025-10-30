@@ -6,15 +6,14 @@ import "./interfaces/IClankerTokenV3_1.sol";
 import "./interfaces/IV4Quoter.sol";
 import "./interfaces/IV3QuoterV2.sol";
 import "./interfaces/IClankerV4_0.sol";
-import "./interfaces/IClankerTokenV4_0.sol";
+import "./interfaces/IUniswapV3Pool.sol";
+import "./lib/MulDiv.sol";
 
 // ---- Minimal Uniswap v3 interfaces needed for pool discovery / checks ----
 interface IUniswapV3Factory {
     function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
 }
-interface IUniswapV3Pool {
-    function liquidity() external view returns (uint128);
-}
+
 // Local QuoterV2 interface with struct signature (per Uniswap v3 Periphery)
 interface IQuoterV2 {
     struct QuoteExactInputSingleParams {
@@ -59,6 +58,10 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
     IUniswapV3Factory constant UNISWAP_V3_FACTORY_BASE = IUniswapV3Factory(0x33128a8fC17869897dcE68Ed026d694621f6FDfD);
     address constant USDC_BASE              = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 
+    // Uniswap V3 addresses (BASE)
+    // Uniswap v3 WETH/USDC 0.30% pool (Base):
+    address constant UNISWAP_V3_POOL_WETH_USDC_BASE = 0x6c561B446416E1A00E8E93E221854d6eA4171372;
+
     // Common v3 fee tiers
     uint24 constant FEE_1bps   = 100;     // 0.01%
     uint24 constant FEE_5bps   = 500;     // 0.05%
@@ -74,6 +77,7 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         address token;
         uint256 value;
         uint256 ethValueInWei;
+        uint256 usdcValue;
         bytes32 txHash;
         string  tokenContext;
         uint256 blockNumber;
@@ -96,8 +100,8 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
     ) external override {
 
         address deployedContract = ctx.sim.getDeployer(ctx.txn.call.callee());
-
         string memory factoryVersion;
+
         if (deployedContract == CLANKER_V4_FACTORY_BASE) {
             factoryVersion = "4";
         } else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
@@ -107,11 +111,13 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         }
 
         string memory tokenContext;
+
         try IClankerTokenV3_1(ctx.txn.call.callee()).context() returns (string memory _context) {
             tokenContext = _context;
         } catch {
             return;
         }
+
         bool isRetakeToken = containsStreammDeployment(tokenContext);
 
         if (!isRetakeToken) {
@@ -137,7 +143,9 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         if (ethValueInWei < MINIMUM_ETH_VALUE) {
          return;
         }
-        
+
+        uint256 usdcValue = getValueInUsdc(ethValueInWei);
+
         TransferData memory data = TransferData({
             fromAddress: inputs.from,
             toAddress: inputs.to,
@@ -151,13 +159,42 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
             factoryVersion: factoryVersion,
             contractDeployerAddress: deployedContract,
             isRetakeToken: isRetakeToken,
-            ethValueInWei: ethValueInWei
+            ethValueInWei: ethValueInWei,
+            usdcValue: usdcValue
         });
 
         emit Transfer(data);
     }
 
     // ---------- helpers ----------
+    function getValueInUsdc(uint256 amountWei) internal returns (uint256 amountUsdc) {
+        IUniswapV3Pool pool = IUniswapV3Pool(UNISWAP_V3_POOL_WETH_USDC_BASE);
+        
+        (uint160 sqrtPriceX96,, , , , ,) = pool.slot0();
+        uint256 priceX192 = uint256(sqrtPriceX96) * uint256(sqrtPriceX96); // Q192
+
+        address t0 = pool.token0();
+        address t1 = pool.token1();
+
+        // Sanity: pool must be exactly WETH/USDC in either order
+        require(
+            (t0 == WETH_BASE && t1 == USDC_BASE) || (t0 == USDC_BASE && t1 == WETH_BASE),
+            "Unexpected pool tokens"
+        );
+
+        // Compute USDC (6 decimals) output for the given ETH wei input.
+        // NOTE: Uniswap v3 price math already uses raw token units, so no extra
+        // decimal scaling is needed beyond the Q192 divide/inverse.
+        if (t0 == WETH_BASE) {
+            // price is USDC per WETH in Q192
+            amountUsdc = MulDiv.mulDiv(amountWei, priceX192, 1 << 192);
+        } else {
+            // price is WETH per USDC in Q192 => invert
+            // amountUSDC = amountWei / (WETH per USDC)
+            //           = amountWei * 2^192 / priceX192
+            amountUsdc = MulDiv.mulDiv(amountWei, 1 << 192, priceX192);
+        }
+    }
 
     function getValueInEthV4(
         address token,
