@@ -6,7 +6,41 @@ import "./interfaces/IClankerTokenV3_1.sol";
 import "./interfaces/IV4Quoter.sol";
 import "./interfaces/IV3QuoterV2.sol";
 import "./interfaces/IClankerV4_0.sol";
-import "./interfaces/IClankerTokenV4_0.sol";
+import "./interfaces/IUniswapV3Pool.sol";
+import "./lib/MulDiv.sol";
+
+// ---- Minimal Uniswap v3 interfaces needed for pool discovery / checks ----
+interface IUniswapV3Factory {
+    function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
+}
+
+// Local QuoterV2 interface with struct signature (per Uniswap v3 Periphery)
+interface IQuoterV2 {
+    struct QuoteExactInputSingleParams {
+        address tokenIn;
+        address tokenOut;
+        uint256 amountIn;
+        uint24  fee;
+        uint160 sqrtPriceLimitX96;
+    }
+    function quoteExactInputSingle(QuoteExactInputSingleParams calldata params)
+        external
+        returns (
+            uint256 amountOut,
+            uint160 sqrtPriceX96After,
+            uint32  initializedTicksCrossed,
+            uint256 gasEstimate
+        );
+
+    function quoteExactInput(bytes calldata path, uint256 amountIn)
+        external
+        returns (
+            uint256 amountOut,
+            uint160[] memory sqrtPriceX96AfterList,
+            uint32[]  memory initializedTicksCrossedList,
+            uint256 gasEstimate
+        );
+}
 
 contract ClankerTokenListener is ERC20$OnTransferEvent {
     // --- Known core addresses (Base) ---
@@ -15,13 +49,27 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
 
     // Clanker Token Factory Addresses
     address constant CLANKER_V3_1_FACTORY_BASE = 0x2A787b2362021cC3eEa3C24C4748a6cD5B687382;
-    address constant CLANKER_V4_FACTORY_BASE = 0xE85A59c628F7d27878ACeB4bf3b35733630083a9;
+    address constant CLANKER_V4_FACTORY_BASE   = 0xE85A59c628F7d27878ACeB4bf3b35733630083a9;
 
-    address constant WETH_BASE                   = 0x4200000000000000000000000000000000000006;
-    address constant UNISWAP_V4_QUOTER_BASE      = 0x0d5e0F971ED27FBfF6c2837bf31316121532048D;
-    address constant UNISWAP_V3_QUOTER_BASE      = 0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a; // QuoterV2
-    uint256 constant MINIMUM_ETH_VALUE           = 0.001 ether;
-    uint24 public constant DYNAMIC_FEE_FLAG = 0x800000; // Uniswap v4 dynamic fee flag
+    // Uniswap v3/v4 + core tokens on Base
+    address constant WETH_BASE              = 0x4200000000000000000000000000000000000006;
+    address constant UNISWAP_V4_QUOTER_BASE = 0x0d5e0F971ED27FBfF6c2837bf31316121532048D;
+    address constant UNISWAP_V3_QUOTER_BASE = 0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a; // QuoterV2
+    IUniswapV3Factory constant UNISWAP_V3_FACTORY_BASE = IUniswapV3Factory(0x33128a8fC17869897dcE68Ed026d694621f6FDfD);
+    address constant USDC_BASE              = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+
+    // Uniswap V3 addresses (BASE)
+    // Uniswap v3 WETH/USDC 0.30% pool (Base):
+    address constant UNISWAP_V3_POOL_WETH_USDC_BASE = 0x6c561B446416E1A00E8E93E221854d6eA4171372;
+
+    // Common v3 fee tiers
+    uint24 constant FEE_1bps   = 100;     // 0.01%
+    uint24 constant FEE_5bps   = 500;     // 0.05%
+    uint24 constant FEE_30bps  = 3000;    // 0.30%
+    uint24 constant FEE_100bps = 10000;   // 1.00%
+
+    uint256 constant MINIMUM_ETH_VALUE = 0.001 ether;
+    uint24  public constant DYNAMIC_FEE_FLAG = 0x800000; // Uniswap v4 dynamic fee flag
 
     struct TransferData {
         address fromAddress;
@@ -29,6 +77,7 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         address token;
         uint256 value;
         uint256 ethValueInWei;
+        uint256 usdcValue;
         bytes32 txHash;
         string  tokenContext;
         uint256 blockNumber;
@@ -42,88 +91,121 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
     event Transfer(TransferData);
     event QuoterError(string reason);
     event QuoterLowLevelError(bytes lowLevelData);
-	event V3QuoterError(string reason);
-	event V3QuoterLowLevelError(bytes lowLevelData);
+    event V3QuoterError(string reason);
+    event V3QuoterLowLevelError(bytes lowLevelData);
 
     function onTransferEvent(
         EventContext memory ctx,
         ERC20$TransferEventParams memory inputs
     ) external override {
 
-		address deployedContract = ctx.sim.getDeployer(ctx.txn.call.callee());
+        address deployedContract = ctx.sim.getDeployer(ctx.txn.call.callee());
+        string memory factoryVersion;
 
-		string memory factoryVersion;
-		if (deployedContract == CLANKER_V4_FACTORY_BASE) {
-			factoryVersion = "4";
-		} else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
-			factoryVersion = "3.1";
-		} else {
-			return;
-		}
+        if (deployedContract == CLANKER_V4_FACTORY_BASE) {
+            factoryVersion = "4";
+        } else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
+            factoryVersion = "3.1";
+        } else {
+            return;
+        }
 
-		string memory tokenContext;
-		try IClankerTokenV3_1(ctx.txn.call.callee()).context() returns (string memory _context) {
-			tokenContext = _context;
-		} catch {
-			return;
-		}
-		bool isRetakeToken = containsStreammDeployment(tokenContext);
+        string memory tokenContext;
 
-		if (!isRetakeToken) {
-			return;
-		}
+        try IClankerTokenV3_1(ctx.txn.call.callee()).context() returns (string memory _context) {
+            tokenContext = _context;
+        } catch {
+            return;
+        }
 
-		uint256 ethValueInWei;
+        bool isRetakeToken = containsStreammDeployment(tokenContext);
 
-		if (deployedContract == CLANKER_V4_FACTORY_BASE) {
-			ethValueInWei = getValueInEthV4(
-				ctx.txn.call.callee(),
-				ctx.txn.hash(),
-				inputs.value
-			);
-		} else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
-			ethValueInWei = getValueInEthV31(
-				ctx.txn.call.callee(),
-				ctx.txn.hash(),
-				inputs.value
-			);
-		}
+        if (!isRetakeToken) {
+            return;
+        }
 
-		// if (ethValueInWei < MINIMUM_ETH_VALUE) {
-		// 	return;
-		// }
-        
-		TransferData memory data = TransferData({
-			fromAddress: inputs.from,
-			toAddress: inputs.to,
-			token: ctx.txn.call.callee(),
-			value: inputs.value,
-			txHash: ctx.txn.hash(),
-			tokenContext: tokenContext,
-			blockNumber: block.number,
-			blockTimestamp: block.timestamp,
-			sell: ctx.txn.call.caller() == inputs.from,
-			factoryVersion: factoryVersion,
-			contractDeployerAddress: deployedContract,
-			isRetakeToken: isRetakeToken,
-			ethValueInWei: ethValueInWei
-		});
-        
-		emit Transfer(data);
+        uint256 ethValueInWei;
+
+        if (deployedContract == CLANKER_V4_FACTORY_BASE) {
+            ethValueInWei = getValueInEthV4(
+                ctx.txn.call.callee(),
+                ctx.txn.hash(),
+                inputs.value
+            );
+        } else if (deployedContract == CLANKER_V3_1_FACTORY_BASE) {
+            ethValueInWei = getValueInEthV31(
+                ctx.txn.call.callee(),
+                ctx.txn.hash(),
+                inputs.value
+            );
+        }
+
+        if (ethValueInWei < MINIMUM_ETH_VALUE) {
+         return;
+        }
+
+        uint256 usdcValue = getValueInUsdc(ethValueInWei);
+
+        TransferData memory data = TransferData({
+            fromAddress: inputs.from,
+            toAddress: inputs.to,
+            token: ctx.txn.call.callee(),
+            value: inputs.value,
+            txHash: ctx.txn.hash(),
+            tokenContext: tokenContext,
+            blockNumber: block.number,
+            blockTimestamp: block.timestamp,
+            sell: ctx.txn.call.caller() == inputs.from,
+            factoryVersion: factoryVersion,
+            contractDeployerAddress: deployedContract,
+            isRetakeToken: isRetakeToken,
+            ethValueInWei: ethValueInWei,
+            usdcValue: usdcValue
+        });
+
+        emit Transfer(data);
     }
 
     // ---------- helpers ----------
+    function getValueInUsdc(uint256 amountWei) internal returns (uint256 amountUsdc) {
+        IUniswapV3Pool pool = IUniswapV3Pool(UNISWAP_V3_POOL_WETH_USDC_BASE);
+        
+        (uint160 sqrtPriceX96,, , , , ,) = pool.slot0();
+        uint256 priceX192 = uint256(sqrtPriceX96) * uint256(sqrtPriceX96); // Q192
 
-	function getValueInEthV4(
+        address t0 = pool.token0();
+        address t1 = pool.token1();
+
+        // Sanity: pool must be exactly WETH/USDC in either order
+        require(
+            (t0 == WETH_BASE && t1 == USDC_BASE) || (t0 == USDC_BASE && t1 == WETH_BASE),
+            "Unexpected pool tokens"
+        );
+
+        // Compute USDC (6 decimals) output for the given ETH wei input.
+        // NOTE: Uniswap v3 price math already uses raw token units, so no extra
+        // decimal scaling is needed beyond the Q192 divide/inverse.
+        if (t0 == WETH_BASE) {
+            // price is USDC per WETH in Q192
+            amountUsdc = MulDiv.mulDiv(amountWei, priceX192, 1 << 192);
+        } else {
+            // price is WETH per USDC in Q192 => invert
+            // amountUSDC = amountWei / (WETH per USDC)
+            //           = amountWei * 2^192 / priceX192
+            amountUsdc = MulDiv.mulDiv(amountWei, 1 << 192, priceX192);
+        }
+    }
+
+    function getValueInEthV4(
         address token,
         bytes32 txHash,
         uint256 amount
     ) internal returns (uint256) {
-		IClankerV4_0 clanker = IClankerV4_0(CLANKER_V4_FACTORY_BASE);
+        IClankerV4_0 clanker = IClankerV4_0(CLANKER_V4_FACTORY_BASE);
 
-		IClankerV4_0.DeploymentInfo memory deploymentInfo = clanker
+        IClankerV4_0.DeploymentInfo memory deploymentInfo = clanker
             .tokenDeploymentInfo(token);
-        
+
         (address c0, address c1, bool aIsFirst) = addressSort(token, WETH_BASE);
 
         // generate poolId
@@ -134,13 +216,13 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
             tickSpacing: 200,
             hooks: deploymentInfo.hook
         });
-        
+
         // Generate the poolId as the keccak256 hash of the encoded poolKey
         bytes32 poolId = keccak256(abi.encode(poolKey));
 
         // Check for overflow when converting uint256 to uint128
         require(amount <= type(uint128).max, "Amount too large for uint128");
-        
+
         IV4Quoter.QuoteExactSingleParams
             memory quoteExactSingleParams = IV4Quoter.QuoteExactSingleParams({
                 poolKey: poolKey,
@@ -149,9 +231,8 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
                 hookData: '0x00'
             });
 
-
         IV4Quoter quoter = IV4Quoter(UNISWAP_V4_QUOTER_BASE);
-        
+
         try quoter.quoteExactInputSingle(quoteExactSingleParams) returns (uint256 amountOut, uint256 gasEstimate) {
             return amountOut;
         } catch Error(string memory reason) {
@@ -165,42 +246,86 @@ contract ClankerTokenListener is ERC20$OnTransferEvent {
         }
     }
 
+    // -------- v3.1 pricing (updated) --------
+
+    /// Find an existing, initialized v3 pool for (token, WETH). Prefers 1% first, then common tiers.
+    function _findInitializedV3Pool(address token) internal view returns (address pool, uint24 fee) {
+        uint24[4] memory fees = [FEE_100bps, FEE_30bps, FEE_5bps, FEE_1bps];
+        for (uint256 i = 0; i < fees.length; ++i) {
+            address p = UNISWAP_V3_FACTORY_BASE.getPool(token, WETH_BASE, fees[i]);
+            if (p != address(0) && IUniswapV3Pool(p).liquidity() > 0) {
+                return (p, fees[i]);
+            }
+        }
+        return (address(0), 0);
+    }
+
+    /// Single-hop quote using QuoterV2 struct params on the discovered fee tier.
+    function _quoteV3SingleHop(address token, uint24 fee, uint256 amountIn) internal returns (uint256) {
+        if (fee == 0) return 0;
+        IQuoterV2 quoter = IQuoterV2(UNISWAP_V3_QUOTER_BASE);
+        try quoter.quoteExactInputSingle(
+            IQuoterV2.QuoteExactInputSingleParams({
+                tokenIn: token,
+                tokenOut: WETH_BASE,
+                amountIn: amountIn,
+                fee: fee,
+                sqrtPriceLimitX96: 0
+            })
+        ) returns (
+            uint256 amountOut,
+            uint160 /* sqrtPriceX96After */,
+            uint32  /* initializedTicksCrossed */,
+            uint256 /* gasEstimate */
+        ) {
+            return amountOut;
+        } catch {
+            return 0;
+        }
+    }
+
+    /// Multi-hop quote token->USDC->WETH with realistic fee combos.
+    function _quoteV3ViaUSDC(address token, uint256 amountIn) internal returns (uint256) {
+        IQuoterV2 quoter = IQuoterV2(UNISWAP_V3_QUOTER_BASE);
+        uint24[2] memory leg1Fees = [FEE_100bps, FEE_30bps]; // token->USDC
+        uint24[2] memory leg2Fees = [FEE_5bps,   FEE_30bps]; // USDC->WETH
+        for (uint256 i = 0; i < leg1Fees.length; ++i) {
+            for (uint256 j = 0; j < leg2Fees.length; ++j) {
+                bytes memory path = abi.encodePacked(token, leg1Fees[i], USDC_BASE, leg2Fees[j], WETH_BASE);
+                try quoter.quoteExactInput(path, amountIn)
+                returns (
+                    uint256 amountOut,
+                    uint160[] memory /* sqrtPriceX96AfterList */,
+                    uint32[]  memory /* initializedTicksCrossedList */,
+                    uint256 /* gasEstimate */
+                ) {
+                    if (amountOut > 0) return amountOut;
+                } catch { /* continue */ }
+            }
+        }
+        return 0;
+    }
+
     function getValueInEthV31(
         address token,
         bytes32 txHash,
         uint256 amount
     ) internal returns (uint256) {
-		// Only use 1% (10000) tier as per v3.1 docs
-		uint24 onePercentFee = 10000;
-		IV3QuoterV2 quoter = IV3QuoterV2(UNISWAP_V3_QUOTER_BASE);
-		// 1) Single hop at 1%
-		try quoter.quoteExactInputSingle(
-			token,
-			WETH_BASE,
-			onePercentFee,
-			amount,
-			0
-		) returns (uint256 amountOutSingle, uint160, uint32, uint256) {
-			if (amountOutSingle > 0) {
-				return amountOutSingle;
-			}
-		} catch {}
+        // 1) Find the actual CLANKER/WETH pool + fee on Base and ensure it's initialized.
+        (address pool, uint24 discoveredFee) = _findInitializedV3Pool(token);
 
-		// 2) Fallback: multi-hop via USDC with 1% on both legs (token -> USDC -> WETH)
-		address USDC_BASE = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-		bytes memory path = abi.encodePacked(token, onePercentFee, USDC_BASE, onePercentFee, WETH_BASE);
-		try quoter.quoteExactInput(path, amount) returns (
-			uint256 amountOut,
-			uint160[] memory,
-			uint32[] memory,
-			uint256
-		) {
-			if (amountOut > 0) {
-				return amountOut;
-			}
-		} catch {}
+        // 2) If live pool exists, try single-hop on that fee tier.
+        if (pool != address(0)) {
+            uint256 outSingle = _quoteV3SingleHop(token, discoveredFee, amount);
+            if (outSingle > 0) return outSingle;
+        }
 
-		return 0;
+        // 3) Fallback: try multi-hop via USDC with realistic fee combinations.
+        uint256 outMulti = _quoteV3ViaUSDC(token, amount);
+        if (outMulti > 0) return outMulti;
+
+        // 4) No route
+        return 0;
     }
 
     function addressSort(

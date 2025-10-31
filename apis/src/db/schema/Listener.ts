@@ -17,6 +17,7 @@ export const transfer = table("transfer", {
   token: db.address('token'),
   value: db.uint256('value'),
   ethValueInWei: db.uint256('eth_value_in_wei'),
+  usdcValue: db.uint256('usdc_value'),
   txHash: db.bytes32('tx_hash'),
   tokenContext: t.text('token_context'),
   blockNumber: db.uint256('block_number'),
