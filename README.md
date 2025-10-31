@@ -1,41 +1,50 @@
-# Sim IDX Sample Project
+# Retake.tv Clanker Token Indexer (Sim IDX)
 
-**Sim IDX** is a framework that helps you build and deploy applications that index blockchain data in minutes. Define listeners that react to specific onchain events, extract relevant data, and automatically make this data queryable via an API.
+**Sim IDX** is a framework for building and deploying apps that index onchain data and expose it via APIs. This app indexes Retake.tv-only **Clanker tokens** on Base (versions **V3.1** and **V4**) and provides a lightweight API to consume the data.
 
-This sample project indexes **Uniswap V3 Factory pool creation events** and serves as your starting point for building with Sim IDX.
-
-When you're ready to continue, the [Quickstart guide](https://docs.sim.dune.com/idx) will walk you through authenticating and testing your listener on real data.
+At a high level: the listener watches all ERC‑20 transfers on Base, filters down to Retake.tv Clanker tokens, computes each transfer’s WETH value using Uniswap V3 or V4 depending on token version, and converts that to a block‑time USD value using the canonical WETH/USDC Uniswap V3 pool. The API then enriches rows with the token’s current USD price using Sim APIs.
 
 ## What You'll Edit
 
 The main files and folders you'll work with are:
 
--   **`abis/`** - Add JSON ABI files for contracts you want to index.
--   **`listeners/src/`** - Define your `Triggers` contract in `Main.sol` and implement your handler logic in one or more listener contracts.
--   **`apis/src/index.ts`** - Define APIs for your indexed data.
+-   **`abis/`** - Add JSON ABIs required by listeners (includes ERC‑20).
+-   **`listeners/src/`** - `Main.sol` registers triggers; `ClankerTokenListener.sol` contains the filtering, pricing, and event emission.
+-   **`apis/src/index.ts`** - API routes that query the indexed tables and enrich rows with current token USD price.
+
+## How It Works
+
+-   **Scope (Base):** Listens to all ERC‑20 `Transfer` logs, then filters to Retake.tv Clanker tokens using factory checks (V3.1/V4) and the token’s `context()` string.
+-   **Price in WETH:** Uses Uniswap V4 Quoter for V4 tokens; for V3.1, discovers an initialized token/WETH pool (or falls back via USDC) and quotes with QuoterV2.
+-   **USD at block‑time:** Converts WETH→USD using the canonical WETH/USDC Uniswap V3 pool’s current `slot0` price.
+-   **Event → table:** Emits a `Transfer` event saved to `transfer` (addresses, amounts, WETH, USD, block info, version, side, context).
+
+On the API side, `apis/src/index.ts` queries recent rows from `transfer` and enriches each row with the token’s **current** USD price (not historical) via Sim APIs (`/v1/evm/token-info`), returning a compact JSON payload for clients.
 
 ## App Structure
 
 ```text
 .
 ├── sim.toml                     # App configuration
-├── apis/                        # Your custom API code
+├── apis/                        # Hono + Drizzle API (Cloudflare Workers)
+│   └── src/index.ts             # Enriches rows with current USD price via Sim APIs
 ├── abis/                        # Contract ABI files (JSON)
-│   └── UniswapV3Factory.json    # Example: Uniswap V3 Factory ABI
+│   └── ERC20.json               # ERC‑20 ABI for log decoding
 └── listeners/                   # Foundry project for listener contracts
     ├── src/
-    │   └── Main.sol             # Triggers contract & listener logic
+    │   ├── Main.sol             # Registers ERC‑20 Transfer trigger on Base
+    │   └── ClankerTokenListener.sol # Filtering, pricing, USD conversion, event emit
     └── test/
-        └── Main.t.sol           # Unit tests for your listener
+        └── Main.t.sol           # Unit tests for the listener
 ```
 
-The `listeners/` directory is a Foundry project where your indexing logic lives. For a detailed breakdown of each file and folder, see the [App Folder Structure](https://docs.sim.dune.com/idx/app-structure) documentation.
+The `listeners/` directory is a Foundry project where your indexing logic lives. For a full breakdown, see the [App Folder Structure](https://docs.sim.dune.com/idx/app-structure).
 
 ## Next Steps
 
-Ready to start building? Check out our comprehensive guides:
+Ready to iterate or deploy?
 
--   **[Deploying Your App](https://docs.sim.dune.com/idx/deployment)** - Deploy your app
--   **[Adding ABIs](https://docs.sim.dune.com/idx/cli#sim-abi)** - How to add contract ABIs
--   **[Writing Listeners](https://docs.sim.dune.com/idx/listener)** - Define your indexing logic
+-   **[Deploying Your App](https://docs.sim.dune.com/idx/deployment)** - Ship to production or previews
+-   **[Adding ABIs](https://docs.sim.dune.com/idx/cli#sim-abi)** - Register additional contracts
+-   **[Writing Listeners](https://docs.sim.dune.com/idx/listener)** - Extend filtering/pricing logic
 -   **[CLI Reference](https://docs.sim.dune.com/idx/cli)** - All available commands
